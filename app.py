@@ -127,6 +127,25 @@ def next_wi_id():
     nxt = max(nums) + 1 if nums else 1
     return f"WI-V1-{nxt}"
 
+def create_new_wi(name, phase, sop_link, sop_file, confirmed):
+    """Shared logic used by both the sidebar page and the floating Quick-Add dialog."""
+    if not name or not name.strip():
+        return None, "Le nom de la WI ne peut pas être vide."
+    new_id = next_wi_id()
+    title = f"WI: {name.strip()}"
+    new_wi = {
+        "id": new_id, "title": title, "phase": phase,
+        "confirmed": confirmed, "sop": sop_link or "",
+        "sop_file_name": None, "sop_file_bytes": None,
+    }
+    if sop_file is not None:
+        new_wi["sop_file_name"] = sop_file.name
+        new_wi["sop_file_bytes"] = sop_file.getvalue()
+    st.session_state.wis.append(new_wi)
+    for b in st.session_state.binomes:
+        set_progress(new_id, b["name"], {"status": "Not Started", "score": "", "notes": ""})
+    return new_id, title
+
 # ─────────────────────────────────────────────
 # COMPUTED KPIs
 # ─────────────────────────────────────────────
@@ -176,7 +195,12 @@ def compute_wi_table():
         total_b = len(st.session_state.binomes)
         pct = teams_completed / total_b if total_b else 0
         mgr = "✅ Confirmed" if w["confirmed"] else "⏳ Pending"
-        sop = w["sop"] if w["sop"] else "—"
+        if w.get("sop_file_name"):
+            sop = f"📊 {w['sop_file_name']}"
+        elif w["sop"]:
+            sop = w["sop"]
+        else:
+            sop = "—"
         rows.append({
             "WI ID": w["id"], "Title": w["title"], "Phase": w["phase"],
             "Teams ✅": teams_completed, "In Progress 🔄": in_prog,
@@ -241,29 +265,76 @@ def export_to_excel():
         pd.DataFrame(compute_category_stats()).to_excel(writer, sheet_name="Insights", index=False)
     return buf.getvalue()
 
+def render_sop_file_preview(wi, key_prefix):
+    """Shows an uploaded SOP Excel file inline (preview table + download button)."""
+    if wi.get("sop_file_bytes"):
+        with st.expander(f"📊 Aperçu SOP — {wi['sop_file_name']}", expanded=False):
+            try:
+                sop_df = pd.read_excel(io.BytesIO(wi["sop_file_bytes"]))
+                st.dataframe(sop_df, use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.warning(f"Impossible d'afficher l'aperçu : {e}")
+            st.download_button(
+                "⬇️ Télécharger ce fichier SOP",
+                data=wi["sop_file_bytes"],
+                file_name=wi["sop_file_name"],
+                key=f"dl_sop_{key_prefix}",
+            )
+
+LOGO_SVG = """
+<svg width="46" height="46" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="wmctGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2e75b6"/>
+      <stop offset="100%" stop-color="#f59c20"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="31" fill="#0f2b46" stroke="url(#wmctGrad)" stroke-width="2"/>
+  <rect x="14" y="34" width="9" height="9" fill="#f59c20" rx="1"/>
+  <rect x="24" y="34" width="9" height="9" fill="#2e75b6" rx="1"/>
+  <rect x="34" y="34" width="9" height="9" fill="#00b050" rx="1"/>
+  <rect x="44" y="34" width="6" height="9" fill="#c00000" rx="1"/>
+  <path d="M20 30 L20 16 L30 16 L36 24 L36 30" stroke="white" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="20" cy="16" r="2.2" fill="#ffd966"/>
+  <path d="M10 48 H54" stroke="#cfe2f3" stroke-width="2" stroke-linecap="round"/>
+</svg>
+"""
+
 # ─────────────────────────────────────────────
 # CUSTOM CSS
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
+  html, body, [class*="css"] { font-family: 'Poppins', sans-serif; }
+
   /* Header bar */
   .wmct-header {
-    background: linear-gradient(135deg, #1f4e79 0%, #2e75b6 100%);
-    color: white; padding: 20px 28px; border-radius: 10px;
-    margin-bottom: 24px;
+    background: linear-gradient(135deg, #0f2b46 0%, #1f4e79 55%, #2e75b6 100%);
+    color: white; padding: 22px 28px; border-radius: 14px;
+    margin-bottom: 24px; display: flex; align-items: center; gap: 16px;
+    box-shadow: 0 4px 18px rgba(15,43,70,.25);
   }
-  .wmct-header h1 { margin: 0; font-size: 1.6rem; }
-  .wmct-header p  { margin: 4px 0 0; opacity: .85; font-size: .9rem; }
+  .wmct-header .logo-box { flex-shrink: 0; }
+  .wmct-header h1 { margin: 0; font-size: 1.5rem; font-weight: 700; letter-spacing: .3px; }
+  .wmct-header p  { margin: 4px 0 0; opacity: .85; font-size: .88rem; }
+
+  /* Sidebar logo */
+  .sidebar-logo { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
+  .sidebar-logo .brand { font-size:1.05rem; font-weight:700; color:white; line-height:1.1; }
+  .sidebar-logo .brand small { display:block; font-weight:400; opacity:.7; font-size:.7rem; }
 
   /* KPI cards */
   .kpi-grid { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 24px; }
   .kpi-card {
     flex: 1; min-width: 130px;
-    background: white; border-radius: 10px;
+    background: white; border-radius: 12px;
     padding: 18px 20px; text-align: center;
-    box-shadow: 0 2px 8px rgba(0,0,0,.08);
+    box-shadow: 0 2px 10px rgba(0,0,0,.07);
     border-top: 4px solid #2e75b6;
+    transition: transform .15s ease, box-shadow .15s ease;
   }
+  .kpi-card:hover { transform: translateY(-3px); box-shadow: 0 6px 16px rgba(0,0,0,.12); }
   .kpi-card .val { font-size: 2rem; font-weight: 700; color: #1f4e79; }
   .kpi-card .lbl { font-size: .78rem; color: #666; margin-top: 4px; text-transform: uppercase; letter-spacing: .5px; }
   .kpi-card.green  { border-top-color: #00b050; }
@@ -286,12 +357,64 @@ st.markdown("""
   .badge-notstarted  { background:#f2f2f2; color:#444; border-radius:4px; padding:2px 8px; font-size:.82rem; font-weight:600; }
 
   /* Sidebar */
-  section[data-testid="stSidebar"] { background: #1f4e79; }
+  section[data-testid="stSidebar"] { background: linear-gradient(180deg,#0f2b46 0%, #1f4e79 100%); }
   section[data-testid="stSidebar"] * { color: white !important; }
   section[data-testid="stSidebar"] .stSelectbox label,
   section[data-testid="stSidebar"] .stTextInput label { color: #cde !important; }
+  section[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,.15); }
+
+  /* Floating "Add New WI" action button — visible on every page */
+  div.st-key-fab_container {
+    position: fixed; bottom: 22px; right: 26px; z-index: 9999;
+    width: auto;
+  }
+  div.st-key-fab_container button {
+    background: linear-gradient(135deg, #f59c20 0%, #e0830a 100%) !important;
+    color: white !important; border: none !important;
+    border-radius: 50px !important; padding: 14px 26px !important;
+    font-weight: 700 !important; font-size: .95rem !important;
+    box-shadow: 0 6px 18px rgba(229,140,10,.45) !important;
+    transition: transform .15s ease, box-shadow .15s ease !important;
+  }
+  div.st-key-fab_container button:hover {
+    transform: translateY(-2px) scale(1.03);
+    box-shadow: 0 8px 22px rgba(229,140,10,.55) !important;
+  }
 </style>
 """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# QUICK-ADD WI DIALOG (opened from the floating button on every page)
+# ─────────────────────────────────────────────
+@st.dialog("➕ Ajouter une nouvelle WI", width="large")
+def add_wi_dialog():
+    st.caption("Ce formulaire est accessible depuis n'importe quelle page via le bouton flottant.")
+    qa_name = st.text_input("Nom de la WI *", placeholder="ex. Open Vessel", key="qa_name")
+    qa_phase = st.selectbox("Phase / Catégorie *", VALID_PHASES, key="qa_phase")
+    qa_link = st.text_input("Lien SOP (optionnel)", key="qa_link")
+    qa_file = st.file_uploader(
+        "📎 Ou parcourir et choisir un fichier Excel SOP depuis le bureau",
+        type=["xlsx", "xls"], key="qa_file",
+    )
+    qa_confirmed = st.checkbox("✅ Confirmé par le manager", key="qa_confirmed")
+
+    if qa_file is not None:
+        st.success(f"Fichier sélectionné : **{qa_file.name}**")
+        try:
+            st.dataframe(pd.read_excel(qa_file), use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.warning(f"Aperçu indisponible : {e}")
+
+    c1, c2 = st.columns(2)
+    if c1.button("➕ Créer la WI", type="primary", use_container_width=True, key="qa_submit"):
+        new_id, result = create_new_wi(qa_name, qa_phase, qa_link, qa_file, qa_confirmed)
+        if new_id is None:
+            st.error(result)
+        else:
+            st.success(f"✅ Créée : **{new_id}** — {result}")
+            st.rerun()
+    if c2.button("Annuler", use_container_width=True, key="qa_cancel"):
+        st.rerun()
 
 # ─────────────────────────────────────────────
 # MAIN
@@ -300,8 +423,12 @@ init_state()
 
 # Sidebar navigation
 with st.sidebar:
-    st.markdown("## ⭐ WMCT Dashboard")
-    st.markdown("**CATOS Training Phase**")
+    st.markdown(f"""
+    <div class="sidebar-logo">
+        {LOGO_SVG}
+        <div class="brand">WMCT Dashboard<small>CATOS Training Phase</small></div>
+    </div>
+    """, unsafe_allow_html=True)
     st.markdown("---")
     page = st.radio("Navigation", [
         "📊 Dashboard",
@@ -313,16 +440,22 @@ with st.sidebar:
         "📤 Export",
     ])
     st.markdown("---")
+    if st.button("➕ Add New WI (quick)", use_container_width=True, key="sidebar_quick_add"):
+        add_wi_dialog()
+    st.markdown("---")
     st.caption(f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
 # ══════════════════════════════════════════════
 # PAGE: DASHBOARD
 # ══════════════════════════════════════════════
 if page == "📊 Dashboard":
-    st.markdown("""
+    st.markdown(f"""
     <div class="wmct-header">
-      <h1>⭐ WMCT — WEST MED CONTAINER TERMINAL</h1>
-      <p>CATOS Training Phase  |  WI Progress Dashboard  |  Pre-Go-Live Training</p>
+      <div class="logo-box">{LOGO_SVG}</div>
+      <div>
+        <h1>WMCT — WEST MED CONTAINER TERMINAL</h1>
+        <p>CATOS Training Phase  |  WI Progress Dashboard  |  Pre-Go-Live Training</p>
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -385,15 +518,25 @@ elif page == "📋 WI Register":
                                          key=f"phase_{i}")
             with col2:
                 new_confirmed = st.checkbox("✅ Manager Confirmed", w["confirmed"], key=f"confirmed_{i}")
-                new_sop = st.text_input("SOP File / Link", w["sop"], key=f"sop_{i}")
+                new_sop = st.text_input("SOP Link (optionnel)", w["sop"], key=f"sop_{i}")
+
+            new_sop_file = st.file_uploader(
+                "📎 Ou parcourir et choisir un fichier Excel SOP depuis le bureau",
+                type=["xlsx", "xls"], key=f"sopfile_{i}",
+            )
 
             if st.button("💾 Save", key=f"save_wi_{i}"):
                 st.session_state.wis[i].update({
                     "title": new_title, "phase": new_phase,
                     "confirmed": new_confirmed, "sop": new_sop,
                 })
+                if new_sop_file is not None:
+                    st.session_state.wis[i]["sop_file_name"] = new_sop_file.name
+                    st.session_state.wis[i]["sop_file_bytes"] = new_sop_file.getvalue()
                 st.success("Saved!")
                 st.rerun()
+
+            render_sop_file_preview(w, key_prefix=f"reg_{i}")
 
             if st.button("🗑️ Delete WI", key=f"del_wi_{i}", type="secondary"):
                 st.session_state.wis.pop(i)
@@ -498,28 +641,25 @@ elif page == "💡 Insights":
 # ══════════════════════════════════════════════
 elif page == "➕ Add New WI":
     st.markdown("## ➕ Add New Work Instruction")
+    st.caption("Astuce : ce formulaire est aussi accessible en un clic depuis n'importe quelle page via le bouton orange flottant en bas à droite.")
 
     with st.form("add_wi_form"):
         wi_name = st.text_input("WI Name *", placeholder="e.g. Open Vessel")
         phase   = st.selectbox("Phase / Category *", VALID_PHASES)
-        sop     = st.text_input("SOP File / Link (optional)")
+        sop     = st.text_input("SOP Link (optionnel)")
+        sop_file = st.file_uploader(
+            "📎 Ou parcourir et choisir un fichier Excel SOP depuis le bureau",
+            type=["xlsx", "xls"],
+        )
         confirmed = st.checkbox("Manager Confirmed")
         submitted = st.form_submit_button("➕ Create WI", type="primary")
 
     if submitted:
-        if not wi_name.strip():
-            st.error("WI name cannot be empty.")
+        new_id, result = create_new_wi(wi_name, phase, sop, sop_file, confirmed)
+        if new_id is None:
+            st.error(result)
         else:
-            new_id = next_wi_id()
-            title = f"WI: {wi_name.strip()}"
-            st.session_state.wis.append({
-                "id": new_id, "title": title, "phase": phase,
-                "confirmed": confirmed, "sop": sop,
-            })
-            # Init empty progress for all binômes
-            for b in st.session_state.binomes:
-                set_progress(new_id, b["name"], {"status": "Not Started", "score": "", "notes": ""})
-            st.success(f"✅ Created: **{new_id}** — {title} ({phase})")
+            st.success(f"✅ Created: **{new_id}** — {result} ({phase})")
 
 
 # ══════════════════════════════════════════════
@@ -598,3 +738,11 @@ elif page == "📤 Export":
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     with tab3:
         st.dataframe(pd.DataFrame(compute_category_stats()), use_container_width=True, hide_index=True)
+
+
+# ══════════════════════════════════════════════
+# FLOATING "ADD NEW WI" BUTTON — visible on every page
+# ══════════════════════════════════════════════
+with st.container(key="fab_container"):
+    if st.button("➕ Add New WI", key="fab_add_wi"):
+        add_wi_dialog()
