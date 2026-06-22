@@ -365,8 +365,7 @@ def render_sop_file_preview(wi, key_prefix):
                 key=f"dl_sop_{key_prefix}",
             )
 
-LOGO_SVG = """
-<svg width="46" height="46" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+LOGO_SVG_RAW = """<svg width="46" height="46" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="wmctGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#2e75b6"/>
@@ -381,8 +380,11 @@ LOGO_SVG = """
   <path d="M20 30 L20 16 L30 16 L36 24 L36 30" stroke="white" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
   <circle cx="20" cy="16" r="2.2" fill="#ffd966"/>
   <path d="M10 48 H54" stroke="#cfe2f3" stroke-width="2" stroke-linecap="round"/>
-</svg>
-"""
+</svg>"""
+
+import base64
+_logo_b64 = base64.b64encode(LOGO_SVG_RAW.encode()).decode()
+LOGO_IMG_TAG = f'<img src="data:image/svg+xml;base64,{_logo_b64}" width="46" height="46" style="vertical-align:middle;"/>'
 
 st.markdown("""
 <style>
@@ -472,44 +474,10 @@ init_state()
 with st.sidebar:
     st.markdown(f"""
     <div class="sidebar-logo">
-        {LOGO_SVG}
+        {LOGO_IMG_TAG}
         <div class="brand">WMCT Dashboard<small>CATOS Training Phase</small></div>
     </div>
     """, unsafe_allow_html=True)
-    st.markdown("---")
-
-    # ── SAVE / LOAD BOX ──────────────────────────────
-    st.markdown("### 💾 Sauvegarde")
-    st.caption("Exportez pour sauvegarder, importez pour restaurer vos données.")
-
-    # Export button (always visible in sidebar)
-    excel_bytes = export_to_excel()
-    fname = f"WMCT_Save_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-    st.download_button(
-        label="⬇️ Sauvegarder (Export Excel)",
-        data=excel_bytes,
-        file_name=fname,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key="sidebar_save",
-    )
-
-    # Import uploader
-    imported_file = st.file_uploader(
-        "📂 Charger une sauvegarde",
-        type=["xlsx", "xls"],
-        key="sidebar_import",
-        help="Sélectionnez le fichier Excel exporté depuis cette application (depuis Google Drive ou votre bureau).",
-    )
-    if imported_file is not None:
-        if st.button("🔄 Restaurer depuis ce fichier", use_container_width=True, type="primary", key="do_import"):
-            ok, msg = import_from_excel(imported_file)
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-
     st.markdown("---")
     page = st.radio("Navigation", [
         "📊 Dashboard",
@@ -533,7 +501,7 @@ with st.sidebar:
 if page == "📊 Dashboard":
     st.markdown(f"""
     <div class="wmct-header">
-      <div class="logo-box">{LOGO_SVG}</div>
+      <div class="logo-box">{LOGO_IMG_TAG}</div>
       <div>
         <h1>WMCT — WEST MED CONTAINER TERMINAL</h1>
         <p>CATOS Training Phase  |  WI Progress Dashboard  |  Pre-Go-Live Training</p>
