@@ -1,6 +1,6 @@
 """
 WMCT WI Dashboard — Streamlit Application
-Replicates all functionality from the Excel/VBA dashboard.
+With Excel Import/Export for persistent save (Google Drive workflow)
 """
 
 import streamlit as st
@@ -10,9 +10,6 @@ import os
 from datetime import datetime
 import io
 
-# ─────────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────────
 st.set_page_config(
     page_title="WMCT WI Dashboard",
     page_icon="⭐",
@@ -20,9 +17,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────
-# DATA STORE  (session_state acts as in-memory DB)
-# ─────────────────────────────────────────────
 VALID_PHASES = [
     "Ship Planning", "Berth Planning", "Operation Management",
     "Yard Define", "Yard Planning", "Terminal Monitoring",
@@ -32,7 +26,6 @@ VALID_PHASES = [
 ]
 
 STATUS_OPTIONS = ["Not Started", "In Progress", "Completed"]
-
 SCORE_OPTIONS = ["", "1", "2", "3", "4", "5"]
 
 DEFAULT_BINOMES = [
@@ -53,7 +46,6 @@ DEFAULT_WIS = [
     {"id": "WI-V1-7", "title": "WI: Standar work",                          "phase": "Operations",     "confirmed": False, "sop": ""},
 ]
 
-# progress[(wi_id, binome_name)] = {"status": ..., "score": ..., "notes": ...}
 DEFAULT_PROGRESS = {
     ("WI-V1-1","Binôme 1"):{"status":"Completed","score":"5","notes":""},
     ("WI-V1-1","Binôme 2"):{"status":"Completed","score":"4","notes":""},
@@ -109,7 +101,6 @@ def set_progress(wi_id, binome_name, data):
     st.session_state.progress[key] = data
 
 def wi_is_completed(wi_id):
-    """A WI is completed if at least one binôme marked it Completed."""
     for b in st.session_state.binomes:
         p = get_progress(wi_id, b["name"])
         if p["status"] == "Completed":
@@ -128,7 +119,6 @@ def next_wi_id():
     return f"WI-V1-{nxt}"
 
 def create_new_wi(name, phase, sop_link, sop_file, confirmed):
-    """Shared logic used by both the sidebar page and the floating Quick-Add dialog."""
     if not name or not name.strip():
         return None, "Le nom de la WI ne peut pas être vide."
     new_id = next_wi_id()
@@ -145,6 +135,90 @@ def create_new_wi(name, phase, sop_link, sop_file, confirmed):
     for b in st.session_state.binomes:
         set_progress(new_id, b["name"], {"status": "Not Started", "score": "", "notes": ""})
     return new_id, title
+
+# ─────────────────────────────────────────────
+# IMPORT FROM EXCEL
+# ─────────────────────────────────────────────
+def import_from_excel(uploaded_file):
+    """
+    Reads the Excel save file and restores wis, binomes, and progress.
+    Returns (success: bool, message: str)
+    """
+    try:
+        xls = pd.ExcelFile(uploaded_file)
+        sheet_names = xls.sheet_names
+
+        # ── 1. WI Register ──────────────────────────────────
+        if "WI_Register" not in sheet_names:
+            return False, "Feuille 'WI_Register' introuvable dans ce fichier."
+        df_wi = pd.read_excel(xls, sheet_name="WI_Register")
+        required_wi_cols = {"id", "title", "phase", "confirmed", "sop"}
+        if not required_wi_cols.issubset(set(df_wi.columns)):
+            return False, f"Colonnes manquantes dans WI_Register. Attendu: {required_wi_cols}"
+
+        new_wis = []
+        for _, row in df_wi.iterrows():
+            wi = {
+                "id":        str(row["id"]),
+                "title":     str(row["title"]),
+                "phase":     str(row["phase"]) if str(row["phase"]) in VALID_PHASES else VALID_PHASES[0],
+                "confirmed": bool(row["confirmed"]) if pd.notna(row["confirmed"]) else False,
+                "sop":       str(row["sop"]) if pd.notna(row["sop"]) else "",
+                "sop_file_name": None,
+                "sop_file_bytes": None,
+            }
+            new_wis.append(wi)
+
+        # ── 2. Progress Data ─────────────────────────────────
+        if "Progress_Data" not in sheet_names:
+            return False, "Feuille 'Progress_Data' introuvable dans ce fichier."
+        df_prog = pd.read_excel(xls, sheet_name="Progress_Data")
+
+        # Detect binôme names from column headers: "<binome> Status"
+        binome_names = []
+        for col in df_prog.columns:
+            if col.endswith(" Status"):
+                bname = col[: -len(" Status")]
+                binome_names.append(bname)
+
+        if not binome_names:
+            return False, "Aucun binôme trouvé dans Progress_Data (colonnes '<Binôme> Status' attendues)."
+
+        new_binomes = [{"name": bn, "members": bn} for bn in binome_names]
+
+        # Try to recover member names from Binomes sheet if present
+        if "Binomes" in sheet_names:
+            df_bin = pd.read_excel(xls, sheet_name="Binomes")
+            if {"name", "members"}.issubset(set(df_bin.columns)):
+                member_map = {str(r["name"]): str(r["members"]) for _, r in df_bin.iterrows()}
+                for b in new_binomes:
+                    if b["name"] in member_map:
+                        b["members"] = member_map[b["name"]]
+
+        new_progress = {}
+        for _, row in df_prog.iterrows():
+            wi_id = str(row["WI ID"])
+            for bn in binome_names:
+                status_col = f"{bn} Status"
+                score_col  = f"{bn} Score"
+                notes_col  = f"{bn} Notes"
+                status = str(row[status_col]) if status_col in df_prog.columns and pd.notna(row.get(status_col)) else "Not Started"
+                score  = str(int(row[score_col])) if score_col in df_prog.columns and pd.notna(row.get(score_col)) else ""
+                notes  = str(row[notes_col]) if notes_col in df_prog.columns and pd.notna(row.get(notes_col)) else ""
+                if status not in STATUS_OPTIONS:
+                    status = "Not Started"
+                key = str((wi_id, bn))
+                new_progress[key] = {"status": status, "score": score, "notes": notes}
+
+        # ── 3. Commit to session state ───────────────────────
+        st.session_state.wis      = new_wis
+        st.session_state.binomes  = new_binomes
+        st.session_state.progress = new_progress
+
+        return True, f"✅ Import réussi — {len(new_wis)} WIs, {len(new_binomes)} binômes chargés."
+
+    except Exception as e:
+        return False, f"Erreur lors de l'import : {e}"
 
 # ─────────────────────────────────────────────
 # COMPUTED KPIs
@@ -248,7 +322,17 @@ def export_to_excel():
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         # WI Register
-        pd.DataFrame(st.session_state.wis).to_excel(writer, sheet_name="WI_Register", index=False)
+        wi_rows = []
+        for w in st.session_state.wis:
+            wi_rows.append({
+                "id": w["id"], "title": w["title"], "phase": w["phase"],
+                "confirmed": w["confirmed"], "sop": w["sop"],
+            })
+        pd.DataFrame(wi_rows).to_excel(writer, sheet_name="WI_Register", index=False)
+
+        # Binomes (so member names survive round-trip)
+        pd.DataFrame(st.session_state.binomes).to_excel(writer, sheet_name="Binomes", index=False)
+
         # Progress Data
         prog_rows = []
         for w in st.session_state.wis:
@@ -256,17 +340,17 @@ def export_to_excel():
             for b in st.session_state.binomes:
                 p = get_progress(w["id"], b["name"])
                 row[f"{b['name']} Status"] = p["status"]
-                row[f"{b['name']} Score"] = p["score"]
-                row[f"{b['name']} Notes"] = p["notes"]
+                row[f"{b['name']} Score"]  = p["score"]
+                row[f"{b['name']} Notes"]  = p["notes"]
             prog_rows.append(row)
         pd.DataFrame(prog_rows).to_excel(writer, sheet_name="Progress_Data", index=False)
+
         # Summary
         pd.DataFrame(compute_wi_table()).to_excel(writer, sheet_name="Dashboard_Summary", index=False)
         pd.DataFrame(compute_category_stats()).to_excel(writer, sheet_name="Insights", index=False)
     return buf.getvalue()
 
 def render_sop_file_preview(wi, key_prefix):
-    """Shows an uploaded SOP Excel file inline (preview table + download button)."""
     if wi.get("sop_file_bytes"):
         with st.expander(f"📊 Aperçu SOP — {wi['sop_file_name']}", expanded=False):
             try:
@@ -300,15 +384,11 @@ LOGO_SVG = """
 </svg>
 """
 
-# ─────────────────────────────────────────────
-# CUSTOM CSS
-# ─────────────────────────────────────────────
 st.markdown("""
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
   html, body, [class*="css"] { font-family: 'Poppins', sans-serif; }
 
-  /* Header bar */
   .wmct-header {
     background: linear-gradient(135deg, #0f2b46 0%, #1f4e79 55%, #2e75b6 100%);
     color: white; padding: 22px 28px; border-radius: 14px;
@@ -319,54 +399,41 @@ st.markdown("""
   .wmct-header h1 { margin: 0; font-size: 1.5rem; font-weight: 700; letter-spacing: .3px; }
   .wmct-header p  { margin: 4px 0 0; opacity: .85; font-size: .88rem; }
 
-  /* Sidebar logo */
   .sidebar-logo { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
   .sidebar-logo .brand { font-size:1.05rem; font-weight:700; color:white; line-height:1.1; }
   .sidebar-logo .brand small { display:block; font-weight:400; opacity:.7; font-size:.7rem; }
 
-  /* KPI cards */
-  .kpi-grid { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 24px; }
+  /* Import banner */
+  .import-banner {
+    background: linear-gradient(135deg, #1a3a5c 0%, #2e75b6 100%);
+    border-radius: 12px; padding: 16px 20px; margin-bottom: 18px;
+    border: 1.5px dashed #f59c20;
+  }
+  .import-banner h3 { color: #f59c20 !important; margin: 0 0 6px; font-size: .95rem; }
+  .import-banner p  { color: #cde !important; margin: 0; font-size: .82rem; }
+
   .kpi-card {
     flex: 1; min-width: 130px;
     background: white; border-radius: 12px;
     padding: 18px 20px; text-align: center;
     box-shadow: 0 2px 10px rgba(0,0,0,.07);
     border-top: 4px solid #2e75b6;
-    transition: transform .15s ease, box-shadow .15s ease;
   }
-  .kpi-card:hover { transform: translateY(-3px); box-shadow: 0 6px 16px rgba(0,0,0,.12); }
   .kpi-card .val { font-size: 2rem; font-weight: 700; color: #1f4e79; }
   .kpi-card .lbl { font-size: .78rem; color: #666; margin-top: 4px; text-transform: uppercase; letter-spacing: .5px; }
-  .kpi-card.green  { border-top-color: #00b050; }
-  .kpi-card.green .val { color: #00b050; }
-  .kpi-card.orange { border-top-color: #f59c20; }
-  .kpi-card.orange .val { color: #f59c20; }
-  .kpi-card.red    { border-top-color: #c00000; }
-  .kpi-card.red .val { color: #c00000; }
 
-  /* Section titles */
   .section-title {
     font-size: 1.1rem; font-weight: 700; color: #1f4e79;
     border-left: 4px solid #2e75b6; padding-left: 10px;
     margin: 28px 0 14px;
   }
 
-  /* Status badges */
-  .badge-completed   { background:#e2f0d9; color:#375623; border-radius:4px; padding:2px 8px; font-size:.82rem; font-weight:600; }
-  .badge-inprogress  { background:#fff2cc; color:#7d6608; border-radius:4px; padding:2px 8px; font-size:.82rem; font-weight:600; }
-  .badge-notstarted  { background:#f2f2f2; color:#444; border-radius:4px; padding:2px 8px; font-size:.82rem; font-weight:600; }
-
-  /* Sidebar */
   section[data-testid="stSidebar"] { background: linear-gradient(180deg,#0f2b46 0%, #1f4e79 100%); }
   section[data-testid="stSidebar"] * { color: white !important; }
-  section[data-testid="stSidebar"] .stSelectbox label,
-  section[data-testid="stSidebar"] .stTextInput label { color: #cde !important; }
   section[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,.15); }
 
-  /* Floating "Add New WI" action button — visible on every page */
   div.st-key-fab_container {
-    position: fixed; bottom: 22px; right: 26px; z-index: 9999;
-    width: auto;
+    position: fixed; bottom: 22px; right: 26px; z-index: 9999; width: auto;
   }
   div.st-key-fab_container button {
     background: linear-gradient(135deg, #f59c20 0%, #e0830a 100%) !important;
@@ -374,37 +441,18 @@ st.markdown("""
     border-radius: 50px !important; padding: 14px 26px !important;
     font-weight: 700 !important; font-size: .95rem !important;
     box-shadow: 0 6px 18px rgba(229,140,10,.45) !important;
-    transition: transform .15s ease, box-shadow .15s ease !important;
-  }
-  div.st-key-fab_container button:hover {
-    transform: translateY(-2px) scale(1.03);
-    box-shadow: 0 8px 22px rgba(229,140,10,.55) !important;
   }
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────
-# QUICK-ADD WI DIALOG (opened from the floating button on every page)
-# ─────────────────────────────────────────────
 @st.dialog("➕ Ajouter une nouvelle WI", width="large")
 def add_wi_dialog():
     st.caption("Ce formulaire est accessible depuis n'importe quelle page via le bouton flottant.")
     qa_name = st.text_input("Nom de la WI *", placeholder="ex. Open Vessel", key="qa_name")
     qa_phase = st.selectbox("Phase / Catégorie *", VALID_PHASES, key="qa_phase")
     qa_link = st.text_input("Lien SOP (optionnel)", key="qa_link")
-    qa_file = st.file_uploader(
-        "📎 Ou parcourir et choisir un fichier Excel SOP depuis le bureau",
-        type=["xlsx", "xls"], key="qa_file",
-    )
+    qa_file = st.file_uploader("📎 Fichier Excel SOP", type=["xlsx", "xls"], key="qa_file")
     qa_confirmed = st.checkbox("✅ Confirmé par le manager", key="qa_confirmed")
-
-    if qa_file is not None:
-        st.success(f"Fichier sélectionné : **{qa_file.name}**")
-        try:
-            st.dataframe(pd.read_excel(qa_file), use_container_width=True, hide_index=True)
-        except Exception as e:
-            st.warning(f"Aperçu indisponible : {e}")
-
     c1, c2 = st.columns(2)
     if c1.button("➕ Créer la WI", type="primary", use_container_width=True, key="qa_submit"):
         new_id, result = create_new_wi(qa_name, qa_phase, qa_link, qa_file, qa_confirmed)
@@ -416,12 +464,11 @@ def add_wi_dialog():
     if c2.button("Annuler", use_container_width=True, key="qa_cancel"):
         st.rerun()
 
-# ─────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────
 init_state()
 
-# Sidebar navigation
+# ─────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────
 with st.sidebar:
     st.markdown(f"""
     <div class="sidebar-logo">
@@ -429,6 +476,40 @@ with st.sidebar:
         <div class="brand">WMCT Dashboard<small>CATOS Training Phase</small></div>
     </div>
     """, unsafe_allow_html=True)
+    st.markdown("---")
+
+    # ── SAVE / LOAD BOX ──────────────────────────────
+    st.markdown("### 💾 Sauvegarde")
+    st.caption("Exportez pour sauvegarder, importez pour restaurer vos données.")
+
+    # Export button (always visible in sidebar)
+    excel_bytes = export_to_excel()
+    fname = f"WMCT_Save_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    st.download_button(
+        label="⬇️ Sauvegarder (Export Excel)",
+        data=excel_bytes,
+        file_name=fname,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="sidebar_save",
+    )
+
+    # Import uploader
+    imported_file = st.file_uploader(
+        "📂 Charger une sauvegarde",
+        type=["xlsx", "xls"],
+        key="sidebar_import",
+        help="Sélectionnez le fichier Excel exporté depuis cette application (depuis Google Drive ou votre bureau).",
+    )
+    if imported_file is not None:
+        if st.button("🔄 Restaurer depuis ce fichier", use_container_width=True, type="primary", key="do_import"):
+            ok, msg = import_from_excel(imported_file)
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
     st.markdown("---")
     page = st.radio("Navigation", [
         "📊 Dashboard",
@@ -445,6 +526,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption(f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
+
 # ══════════════════════════════════════════════
 # PAGE: DASHBOARD
 # ══════════════════════════════════════════════
@@ -459,32 +541,27 @@ if page == "📊 Dashboard":
     </div>
     """, unsafe_allow_html=True)
 
+    # How-to-save callout
+    st.info(
+        "💡 **Astuce sauvegarde** — Cliquez sur **⬇️ Sauvegarder** dans la barre latérale après chaque session "
+        "et gardez le fichier Excel sur Google Drive. La prochaine fois, rechargez-le via **📂 Charger une sauvegarde**.",
+        icon=None,
+    )
+
     kpis = compute_kpis()
-
-    # KPI Cards
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        st.metric("📋 Total WIs", kpis["total"])
-    with c2:
-        st.metric("✅ Completed", kpis["completed"])
-    with c3:
-        st.metric("🔄 In Progress", kpis["in_progress"])
-    with c4:
-        st.metric("⏳ Not Confirmed", kpis["not_confirmed"])
-    with c5:
-        st.metric("🔐 Confirmed", kpis["confirmed"])
+    with c1: st.metric("📋 Total WIs", kpis["total"])
+    with c2: st.metric("✅ Completed", kpis["completed"])
+    with c3: st.metric("🔄 In Progress", kpis["in_progress"])
+    with c4: st.metric("⏳ Not Confirmed", kpis["not_confirmed"])
+    with c5: st.metric("🔐 Confirmed", kpis["confirmed"])
 
-    # Progress bar
     st.markdown(f"**Overall Completion: {kpis['pct']:.0%}**")
     st.progress(kpis["pct"])
 
-    # ── Binôme Overview ──
     st.markdown('<div class="section-title">BINÔME PROGRESS OVERVIEW</div>', unsafe_allow_html=True)
-    binome_rows = compute_binome_stats()
-    df_binome = pd.DataFrame(binome_rows)
-    st.dataframe(df_binome, use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(compute_binome_stats()), use_container_width=True, hide_index=True)
 
-    # Mini progress bars per binôme
     cols = st.columns(len(st.session_state.binomes))
     for i, b in enumerate(st.session_state.binomes):
         bn = b["name"]
@@ -495,10 +572,8 @@ if page == "📊 Dashboard":
             st.caption(f"**{bn}**\n{b['members']}")
             st.progress(pct, text=f"{pct:.0%}")
 
-    # ── WI Table ──
     st.markdown('<div class="section-title">WI STATUS TABLE</div>', unsafe_allow_html=True)
-    df_wi = pd.DataFrame(compute_wi_table())
-    st.dataframe(df_wi, use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(compute_wi_table()), use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════
@@ -507,7 +582,6 @@ if page == "📊 Dashboard":
 elif page == "📋 WI Register":
     st.markdown("## 📋 WI Register")
     st.caption("All Work Instructions — edit titles, phases, manager confirmation and SOP links.")
-
     for i, w in enumerate(st.session_state.wis):
         with st.expander(f"**{w['id']}** — {w['title']}", expanded=False):
             col1, col2 = st.columns(2)
@@ -519,12 +593,7 @@ elif page == "📋 WI Register":
             with col2:
                 new_confirmed = st.checkbox("✅ Manager Confirmed", w["confirmed"], key=f"confirmed_{i}")
                 new_sop = st.text_input("SOP Link (optionnel)", w["sop"], key=f"sop_{i}")
-
-            new_sop_file = st.file_uploader(
-                "📎 Ou parcourir et choisir un fichier Excel SOP depuis le bureau",
-                type=["xlsx", "xls"], key=f"sopfile_{i}",
-            )
-
+            new_sop_file = st.file_uploader("📎 Fichier Excel SOP", type=["xlsx", "xls"], key=f"sopfile_{i}")
             if st.button("💾 Save", key=f"save_wi_{i}"):
                 st.session_state.wis[i].update({
                     "title": new_title, "phase": new_phase,
@@ -535,9 +604,7 @@ elif page == "📋 WI Register":
                     st.session_state.wis[i]["sop_file_bytes"] = new_sop_file.getvalue()
                 st.success("Saved!")
                 st.rerun()
-
             render_sop_file_preview(w, key_prefix=f"reg_{i}")
-
             if st.button("🗑️ Delete WI", key=f"del_wi_{i}", type="secondary"):
                 st.session_state.wis.pop(i)
                 st.rerun()
@@ -549,17 +616,13 @@ elif page == "📋 WI Register":
 elif page == "🔄 Progress Data":
     st.markdown("## 🔄 Progress Data")
     st.caption("Update each binôme's status, score (1-5) and notes for every WI.")
-
     binome_names = [b["name"] for b in st.session_state.binomes]
     selected_binome = st.selectbox("Filter by Binôme (or see all)", ["All"] + binome_names)
-
     for w in st.session_state.wis:
         st.markdown(f"### {w['id']} — {w['title']}")
         st.caption(f"Phase: {w['phase']}")
-
         binomes_to_show = st.session_state.binomes if selected_binome == "All" \
             else [b for b in st.session_state.binomes if b["name"] == selected_binome]
-
         cols = st.columns(len(binomes_to_show))
         for j, b in enumerate(binomes_to_show):
             bn = b["name"]
@@ -585,35 +648,22 @@ elif page == "🔄 Progress Data":
 # ══════════════════════════════════════════════
 elif page == "💡 Insights":
     st.markdown("## 💡 Insights & Analytics")
-    st.caption("A WI is 'Completed' once at least 1 binôme has marked it Completed.")
-
-    # Category breakdown
-    st.markdown('<div class="section-title">WIs BY CATEGORY</div>', unsafe_allow_html=True)
     df_cat = pd.DataFrame(compute_category_stats())
     df_cat_active = df_cat[df_cat["Total WIs"] > 0]
+    st.markdown('<div class="section-title">WIs BY CATEGORY</div>', unsafe_allow_html=True)
     st.dataframe(df_cat_active, use_container_width=True, hide_index=True)
-
-    # Bar chart
     if not df_cat_active.empty:
-        st.markdown("**Category completion chart**")
-        chart_data = df_cat_active.set_index("Category")[["Completed", "Not Completed"]]
-        st.bar_chart(chart_data, color=["#00b050", "#c00000"])
-
-    # Incomplete WIs
+        st.bar_chart(df_cat_active.set_index("Category")[["Completed", "Not Completed"]], color=["#00b050", "#c00000"])
     st.markdown('<div class="section-title">WI À SUIVRE — NON COMPLÈTES</div>', unsafe_allow_html=True)
     inc = incomplete_wis()
     if inc:
         df_inc = pd.DataFrame(inc)
-        # Group by phase
         for phase in sorted(df_inc["Phase"].unique()):
             st.markdown(f"**{phase}**")
-            sub = df_inc[df_inc["Phase"] == phase][["WI ID", "Title", "Status"]]
-            st.dataframe(sub, use_container_width=True, hide_index=True)
+            st.dataframe(df_inc[df_inc["Phase"] == phase][["WI ID", "Title", "Status"]], use_container_width=True, hide_index=True)
         st.info(f"Total WI non complètes : **{len(inc)}**")
     else:
         st.success("✅ Aucune WI incomplète — tout est à jour !")
-
-    # Binôme performance
     st.markdown('<div class="section-title">BINÔME PERFORMANCE</div>', unsafe_allow_html=True)
     for b in st.session_state.binomes:
         bn = b["name"]
@@ -621,10 +671,8 @@ elif page == "💡 Insights":
         for w in st.session_state.wis:
             p = get_progress(w["id"], bn)
             if p["score"]:
-                try:
-                    scores.append(int(p["score"]))
-                except:
-                    pass
+                try: scores.append(int(p["score"]))
+                except: pass
         avg_score = sum(scores) / len(scores) if scores else 0
         comp_count = sum(1 for w in st.session_state.wis if get_progress(w["id"], bn)["status"] == "Completed")
         total = len(st.session_state.wis)
@@ -641,19 +689,13 @@ elif page == "💡 Insights":
 # ══════════════════════════════════════════════
 elif page == "➕ Add New WI":
     st.markdown("## ➕ Add New Work Instruction")
-    st.caption("Astuce : ce formulaire est aussi accessible en un clic depuis n'importe quelle page via le bouton orange flottant en bas à droite.")
-
     with st.form("add_wi_form"):
-        wi_name = st.text_input("WI Name *", placeholder="e.g. Open Vessel")
-        phase   = st.selectbox("Phase / Category *", VALID_PHASES)
-        sop     = st.text_input("SOP Link (optionnel)")
-        sop_file = st.file_uploader(
-            "📎 Ou parcourir et choisir un fichier Excel SOP depuis le bureau",
-            type=["xlsx", "xls"],
-        )
+        wi_name   = st.text_input("WI Name *", placeholder="e.g. Open Vessel")
+        phase     = st.selectbox("Phase / Category *", VALID_PHASES)
+        sop       = st.text_input("SOP Link (optionnel)")
+        sop_file  = st.file_uploader("📎 Fichier Excel SOP", type=["xlsx", "xls"])
         confirmed = st.checkbox("Manager Confirmed")
         submitted = st.form_submit_button("➕ Create WI", type="primary")
-
     if submitted:
         new_id, result = create_new_wi(wi_name, phase, sop, sop_file, confirmed)
         if new_id is None:
@@ -667,8 +709,6 @@ elif page == "➕ Add New WI":
 # ══════════════════════════════════════════════
 elif page == "👥 Manage Binômes":
     st.markdown("## 👥 Manage Binômes / Groups")
-
-    # List existing
     st.markdown("### Current Binômes")
     for i, b in enumerate(st.session_state.binomes):
         c1, c2, c3 = st.columns([2, 3, 1])
@@ -678,14 +718,12 @@ elif page == "👥 Manage Binômes":
             st.session_state.binomes[i]["members"] = new_members
             st.success("Saved!")
             st.rerun()
-
     st.divider()
     st.markdown("### Add New Binôme")
     with st.form("add_binome_form"):
         nb_name    = st.text_input("Binôme Name *", placeholder="e.g. Binôme 6")
         nb_members = st.text_input("Members *", placeholder="e.g. Ali & Omar")
         sub_b = st.form_submit_button("➕ Add Binôme", type="primary")
-
     if sub_b:
         if not nb_name.strip() or not nb_members.strip():
             st.error("Both fields are required.")
@@ -701,31 +739,55 @@ elif page == "👥 Manage Binômes":
 # PAGE: EXPORT
 # ══════════════════════════════════════════════
 elif page == "📤 Export":
-    st.markdown("## 📤 Export Data")
+    st.markdown("## 📤 Export & Sauvegarde")
 
-    st.info("Download the full dashboard data as an Excel file.")
+    # ── SAVE/RESTORE GUIDE ──────────────────────────────
+    st.markdown("""
+    <div style="background:linear-gradient(135deg,#1a3a5c,#2e75b6);border-radius:12px;padding:18px 22px;border:1.5px dashed #f59c20;margin-bottom:20px;">
+      <h3 style="color:#f59c20;margin:0 0 8px;">📖 Comment sauvegarder & restaurer vos données</h3>
+      <ol style="color:#cde;margin:0;padding-left:18px;font-size:.88rem;line-height:1.8;">
+        <li><strong style="color:white;">Exportez</strong> le fichier Excel ci-dessous après chaque session de travail.</li>
+        <li>Enregistrez ce fichier sur <strong style="color:#f59c20;">Google Drive</strong> (ou clé USB / bureau).</li>
+        <li>La prochaine fois que vous ouvrez l'application, utilisez <strong style="color:white;">📂 Charger une sauvegarde</strong> dans la barre latérale gauche pour tout restaurer en 1 clic.</li>
+      </ol>
+    </div>
+    """, unsafe_allow_html=True)
+
     excel_bytes = export_to_excel()
-    fname = f"WMCT_WI_Dashboard_Export_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    fname = f"WMCT_Save_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
     st.download_button(
-        label="⬇️ Download Excel Export",
+        label="⬇️ Télécharger la sauvegarde Excel",
         data=excel_bytes,
         file_name=fname,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
+        use_container_width=True,
     )
 
     st.divider()
-    st.markdown("### Export incomplete WIs report")
+    st.markdown("### Restaurer depuis un fichier")
+    st.caption("Vous pouvez aussi importer ici (même résultat que la barre latérale).")
+    restore_file = st.file_uploader("📂 Choisir un fichier de sauvegarde", type=["xlsx", "xls"], key="export_page_import")
+    if restore_file is not None:
+        if st.button("🔄 Restaurer", type="primary", key="export_page_do_import"):
+            ok, msg = import_from_excel(restore_file)
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
+    st.divider()
+    st.markdown("### Export données incomplètes (CSV)")
     inc = incomplete_wis()
     if inc:
-        df_inc = pd.DataFrame(inc)
-        csv = df_inc.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Download Incomplete WIs (CSV)", csv, "incomplete_wis.csv", "text/csv")
+        csv = pd.DataFrame(inc).to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ WIs incomplètes (CSV)", csv, "incomplete_wis.csv", "text/csv")
     else:
         st.success("✅ No incomplete WIs!")
 
     st.divider()
-    st.markdown("### Current data snapshot")
+    st.markdown("### Aperçu des données actuelles")
     tab1, tab2, tab3 = st.tabs(["WI Register", "Progress Data", "Category Stats"])
     with tab1:
         st.dataframe(pd.DataFrame(st.session_state.wis), use_container_width=True, hide_index=True)
@@ -740,9 +802,7 @@ elif page == "📤 Export":
         st.dataframe(pd.DataFrame(compute_category_stats()), use_container_width=True, hide_index=True)
 
 
-# ══════════════════════════════════════════════
-# FLOATING "ADD NEW WI" BUTTON — visible on every page
-# ══════════════════════════════════════════════
+# ── FLOATING BUTTON ──────────────────────────────────────────────
 with st.container(key="fab_container"):
     if st.button("➕ Add New WI", key="fab_add_wi"):
         add_wi_dialog()
